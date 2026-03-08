@@ -77,10 +77,10 @@ parser.add_argument('--load-images-from-split', action='store_true',
                     help='If images should be loaded exactly from split (as opposed to fires)')
 
 # Dataloader args
-parser.add_argument('--train-split-size', type=int, default=0.7,
-                    help='% of data to split for train. Only used when not loading pre-created splits.')
-parser.add_argument('--test-split-size', type=int, default=0.15,
-                    help='% of data to split for test. Only used when not loading pre-created splits.')
+parser.add_argument('--train-split-size', type=float, default=0.7,
+                    help='%% of data to split for train. Only used when not loading pre-created splits.')
+parser.add_argument('--test-split-size', type=float, default=0.15,
+                    help='%% of data to split for test. Only used when not loading pre-created splits.')
 parser.add_argument('--batch-size', type=int, default=1,
                     help='Batch size for training.')
 parser.add_argument('--num-workers', type=int, default=4,
