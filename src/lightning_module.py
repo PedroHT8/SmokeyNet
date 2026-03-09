@@ -84,10 +84,10 @@ class LightningModule(pl.LightningModule):
                 # Use mdmc_average='global' for tile_preds only
                 mdmc_average='global' if i == 0 else None
                 
-                self.metrics['torchmetric'][split+category+self.metrics['name'][0]] = torchmetrics.Accuracy(mdmc_average=mdmc_average)
-                self.metrics['torchmetric'][split+category+self.metrics['name'][1]] = torchmetrics.Precision(multiclass=False, mdmc_average=mdmc_average)
-                self.metrics['torchmetric'][split+category+self.metrics['name'][2]] = torchmetrics.Recall(multiclass=False, mdmc_average=mdmc_average)
-                self.metrics['torchmetric'][split+category+self.metrics['name'][3]] = torchmetrics.F1(multiclass=False, mdmc_average=mdmc_average)
+                self.metrics['torchmetric'][split+category+self.metrics['name'][0]] = torchmetrics.Accuracy(task="binary")
+                self.metrics['torchmetric'][split+category+self.metrics['name'][1]] = torchmetrics.Precision(task="binary")
+                self.metrics['torchmetric'][split+category+self.metrics['name'][2]] = torchmetrics.Recall(task="binary")
+                self.metrics['torchmetric'][split+category+self.metrics['name'][3]] = torchmetrics.F1Score(task="binary")
             
         print("Initializing LightningModule Complete.")
 
