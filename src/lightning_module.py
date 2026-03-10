@@ -88,7 +88,9 @@ class LightningModule(pl.LightningModule):
                 self.metrics['torchmetric'][split+category+self.metrics['name'][1]] = torchmetrics.Precision(task="binary")
                 self.metrics['torchmetric'][split+category+self.metrics['name'][2]] = torchmetrics.Recall(task="binary")
                 self.metrics['torchmetric'][split+category+self.metrics['name'][3]] = torchmetrics.F1Score(task="binary")
-            
+
+        self.test_step_outputs = []
+
         print("Initializing LightningModule Complete.")
 
     def configure_optimizers(self):
@@ -172,20 +174,23 @@ class LightningModule(pl.LightningModule):
 
     def test_step(self, batch, batch_idx):
         image_names, image_loss, total_loss, tile_probs, tile_preds, image_preds, image_probs, tile_labels = self.step(batch, self.metrics['split'][2])
-        return image_names, image_loss, tile_probs, tile_preds, image_preds, image_probs, tile_labels
 
+        out = (image_names, image_loss, tile_probs, tile_preds, image_preds, image_probs, tile_labels)
+        self.test_step_outputs.append(out)
+        return out
     
     #########################
     ## Test Metric Logging
     #########################
 
-    def test_epoch_end(self, test_step_outputs):
+    def on_test_epoch_end(self):
         """
         Description: saves predictions to .txt files and computes additional evaluation metrics for test set (e.g. time-to-detection)
         Args:
             - test_step_outputs (list of {image_names, tile_probs, tile_preds, image_preds}): what's returned from test_step
         """
-        
+        test_step_outputs = self.test_step_outputs
+
         print("Computing Test Evaluation Metrics...")
         positive_preds_dict = {} # Holds positive predictions for each fire
         negative_preds_dict = {} # Holds negative predictions for each fire
@@ -245,6 +250,7 @@ class LightningModule(pl.LightningModule):
         
         if self.logger is None: 
             print("No logger. Skipping calculating metrics.")
+            self.test_step_outputs.clear()
             return
             
         image_preds_csv.close()
@@ -274,4 +280,6 @@ class LightningModule(pl.LightningModule):
         self.log(self.metrics['split'][2]+'median_time_to_detection', median_time_to_detection,batch_size=self.batch_size)
         self.log(self.metrics['split'][2]+'std_time_to_detection', std_time_to_detection,batch_size=self.batch_size)
         
+        self.test_step_outputs.clear()
+
         print("Computing Test Evaluation Metrics Complete.")

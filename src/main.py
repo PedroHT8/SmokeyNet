@@ -9,7 +9,7 @@ Description: Kicks off training and evaluation. Contains many command line argum
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
-from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, StochasticWeightAveraging
 from pytorch_lightning.loggers import TensorBoardLogger
 
 # Other package imports
@@ -418,6 +418,10 @@ def main(# Debug args
         lr_monitor = LearningRateMonitor(logging_interval='epoch')
         callbacks.append(lr_monitor)
 
+    if stochastic_weight_avg:
+        swa_callback = StochasticWeightAveraging(swa_lrs=1e-2)
+        callbacks.append(swa_callback)
+
     ### Initialize Trainer ###
 
     # Initialize logger 
@@ -434,15 +438,13 @@ def main(# Debug args
         min_epochs=min_epochs,
         max_epochs=max_epochs,
         callbacks=callbacks,
-        precision=16 if sixteen_bit else 32,
-        stochastic_weight_avg=stochastic_weight_avg,
+        precision="16-mixed" if sixteen_bit else 32,
         gradient_clip_val=gradient_clip_val,
         accumulate_grad_batches=accumulate_grad_batches,
 
         # Other args
-        resume_from_checkpoint=checkpoint_path if not is_extra_training else None,
         logger=logger if not is_debug else False,
-        log_every_n_steps=512/(batch_size*accumulate_grad_batches),
+        log_every_n_steps=max(1, 512 // (batch_size * accumulate_grad_batches)),
 #             val_check_interval=0.5,
 
         # Dev args
@@ -456,13 +458,16 @@ def main(# Debug args
 #             weights_summary='full',
 #             profiler="simple", # "advanced" "pytorch"
 #             log_gpu_memory=True,
-        gpus=1)
+        accelerator="gpu",
+        devices=1)
 
     ### Training & Evaluation ###
+    ckpt_path_for_fit = checkpoint_path if (checkpoint_path is not None and not is_extra_training) else None
+
     if is_test_only:
-        trainer.test(lightning_module, datamodule=data_module)
+        trainer.test(lightning_module, datamodule=data_module, ckpt_path=checkpoint_path)
     else:
-        trainer.fit(lightning_module, datamodule=data_module)
+        trainer.fit(lightning_module, datamodule=data_module, ckpt_path=ckpt_path_for_fit)
         trainer.test(lightning_module, datamodule=data_module)
     
     
