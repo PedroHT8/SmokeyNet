@@ -81,6 +81,7 @@ This recovers almost the complete original training set without recreating the
 unpublished contour masks manually.
 
 - Technical rationale and limitations: [PRECOMPUTED_TILE_LABELS.md](PRECOMPUTED_TILE_LABELS.md)
+- TFM experiment log and interpretation: [docs/TFM_EXPERIMENT_LOG.md](docs/TFM_EXPERIMENT_LOG.md)
 - Colab workflow: [notebooks/SmokeyNet_PaperDataset_precomputed.ipynb](notebooks/SmokeyNet_PaperDataset_precomputed.ipynb)
 - Dataset preflight: `scripts/validate_tile_label_stats.py`
 
