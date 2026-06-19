@@ -73,6 +73,17 @@ Special models include:
 **Steps to Run:**
 To run training, use ```./run_train.sh```. You can check ```main.py``` for a full list of tunable hyperparameters as command line arguments.
 
+## TFM reproducibility extension
+
+This fork can train the tile-classification architecture with the official
+precomputed tile statistics in `data/label_stats/labels_stats_90overlap.pkl`.
+This recovers almost the complete original training set without recreating the
+unpublished contour masks manually.
+
+- Technical rationale and limitations: [PRECOMPUTED_TILE_LABELS.md](PRECOMPUTED_TILE_LABELS.md)
+- Colab workflow: [notebooks/SmokeyNet_PaperDataset_precomputed.ipynb](notebooks/SmokeyNet_PaperDataset_precomputed.ipynb)
+- Dataset preflight: `scripts/validate_tile_label_stats.py`
+
 ## Logging
 **Relevant Directories:**
 - ```./lightning_logs/``` (currently not pushed to repo): Automatically generated each run where logs & checkpoints are saved

@@ -62,6 +62,8 @@ parser.add_argument('--raw-data-path', type=str, default='/root/raw_images',
                     help='Path to raw images.')
 parser.add_argument('--labels-path', type=str, default='/root/drive_clone_numpy',
                     help='Path to processed XML labels.')
+parser.add_argument('--tile-label-stats-path', type=str, default=None,
+                    help='Optional pickle containing per-image smoke-pixel counts for each tile. Positive training images without an entry are omitted.')
 parser.add_argument('--metadata-path', type=str, default='./data/metadata.pkl',
                     help='Path to metadata.pkl.')
 parser.add_argument('--optical-flow-path', type=str, default=None,
@@ -215,6 +217,7 @@ def main(# Debug args
         # Path args
         raw_data_path=None, 
         labels_path=None, 
+        tile_label_stats_path=None,
         metadata_path=None,
         optical_flow_path=None,
     
@@ -308,6 +311,7 @@ def main(# Debug args
         # Path args
         raw_data_path=raw_data_path,
         labels_path=labels_path,
+        tile_label_stats_path=tile_label_stats_path,
         metadata_path=metadata_path,
         optical_flow_path=optical_flow_path,
         
@@ -500,6 +504,7 @@ if __name__ == '__main__':
         # Path args - always used command line args for these
         raw_data_path=args['raw_data_path'],
         labels_path=args['labels_path'], 
+        tile_label_stats_path=args['tile_label_stats_path'],
         metadata_path=args['metadata_path'],
         optical_flow_path=args['optical_flow_path'],
         
