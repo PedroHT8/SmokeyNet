@@ -28,14 +28,14 @@ def code(text):
 
 
 repo_patch = subprocess.run(
-    ['git', 'diff', '--', 'src/dynamic_dataloader.py', 'src/main.py'],
+    ['git', 'diff', 'master', '--', 'src/dynamic_dataloader.py', 'src/main.py'],
     cwd=ROOT,
     check=True,
     capture_output=True,
     text=True,
 ).stdout
 if not repo_patch:
-    raise SystemExit('No source patch found. Build before committing or update the notebook setup cell.')
+    raise SystemExit('No source difference from master found; update the notebook setup cell.')
 
 
 cells = [
@@ -314,14 +314,47 @@ print('BEST_CKPT:', BEST_CKPT)
 print('LAST_CKPT:', LAST_CKPT)
 
 eval_args = base_args.copy()
-eval_args[eval_args.index('--experiment-name') + 1] = EXPERIMENT_NAME + '_best_test'
+EVAL_EXPERIMENT_NAME = EXPERIMENT_NAME + '_best_test'
+eval_args[eval_args.index('--experiment-name') + 1] = EVAL_EXPERIMENT_NAME
 eval_args += ['--checkpoint-path', str(BEST_CKPT), '--is-test-only']
-subprocess.run(eval_args, cwd=REPO_DIR, env=env, check=True)
+eval_proc = subprocess.run(
+    eval_args,
+    cwd=REPO_DIR,
+    env=env,
+    text=True,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+)
+print(eval_proc.stdout[-30000:])
+if eval_proc.returncode != 0:
+    raise RuntimeError(f'La evaluacion fallo con returncode={eval_proc.returncode}.')
 print('Evaluacion del best checkpoint terminada.')
+
+# TensorBoard provides a second, machine-readable route to the test metrics.
+from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+
+eval_event_files = sorted(
+    (REPO_DIR / 'lightning_logs' / EVAL_EXPERIMENT_NAME).glob('version_*/events.out.tfevents.*'),
+    key=lambda path: path.stat().st_mtime,
+)
+TEST_METRICS = {}
+if eval_event_files:
+    accumulator = EventAccumulator(str(eval_event_files[-1]))
+    accumulator.Reload()
+    for tag in accumulator.Tags().get('scalars', []):
+        if tag.startswith('test/') and accumulator.Scalars(tag):
+            TEST_METRICS[tag] = accumulator.Scalars(tag)[-1].value
+
+print('Metricas test recuperadas de TensorBoard:')
+for name, value in sorted(TEST_METRICS.items()):
+    print(f'{name}: {value:.6f}')
+if not TEST_METRICS:
+    print('AVISO: TensorBoard no contiene escalares test; revisa la salida anterior.')
 '''),
     code(r'''
 # 10. Guardar checkpoints y logs en Drive
 import shutil
+import json
 from datetime import datetime
 
 destination = DRIVE_ROOT / f'{EXPERIMENT_NAME}_{datetime.now():%Y%m%d_%H%M%S}'
@@ -333,6 +366,12 @@ if LAST_CKPT is not None:
 log_source = BEST_CKPT.parents[1]
 for event_file in log_source.glob('events.out.tfevents.*'):
     shutil.copy2(event_file, destination / event_file.name)
+if eval_event_files:
+    shutil.copy2(eval_event_files[-1], destination / 'best_test_events.tfevents')
+(destination / 'best_test_metrics.json').write_text(
+    json.dumps(TEST_METRICS, indent=2, sort_keys=True),
+    encoding='utf-8',
+)
 print('Resultados guardados en:', destination)
 '''),
 ]
