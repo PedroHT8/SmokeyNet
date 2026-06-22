@@ -352,11 +352,14 @@ train_proc = subprocess.Popen(
     text=True,
     stdout=subprocess.PIPE,
     stderr=subprocess.STDOUT,
-    bufsize=1,
+    bufsize=0,
 )
-for line in iter(train_proc.stdout.readline, ''):
-    print(line, end='', flush=True)
-    output_tail.append(line)
+while True:
+    chunk = train_proc.stdout.read(1024)
+    if not chunk:
+        break
+    print(chunk, end='', flush=True)
+    output_tail.append(chunk)
 returncode = train_proc.wait()
 if returncode != 0:
     print('\nULTIMAS LINEAS DEL PROCESO:\n' + ''.join(output_tail)[-30000:])
