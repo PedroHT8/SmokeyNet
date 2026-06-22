@@ -55,6 +55,7 @@ import os
 drive.mount('/content/drive')
 
 RUN_MODE = 'diagnostic'  # 'diagnostic' o 'full'
+AUTO_RESUME = True  # Reanuda full desde el last.ckpt persistente si existe.
 REPO_URL = 'https://github.com/PedroHT8/SmokeyNet.git'
 REPO_DIR = Path('/content/SmokeyNet')
 RAW_ROOT = Path('/content/data/raw_images')
@@ -252,6 +253,11 @@ import shlex
 
 EXPERIMENT_NAME = f'smokeynet_paper_precomputed_{RUN_MODE}'
 MAX_EPOCHS = 2 if RUN_MODE == 'diagnostic' else 25
+GPU_MEMORY_GB = torch.cuda.get_device_properties(0).total_memory / 1024**3
+BATCH_SIZE = 2 if GPU_MEMORY_GB >= 30 else 1
+ACCUMULATE_GRAD_BATCHES = 32 // BATCH_SIZE
+PERSISTENT_CHECKPOINT_DIR = DRIVE_ROOT / 'checkpoints' / EXPERIMENT_NAME
+PERSISTENT_CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
 base_args = [
     sys.executable, '-u', 'src/main.py',
@@ -260,6 +266,7 @@ base_args = [
     '--raw-data-path', str(RAW_ROOT),
     '--labels-path', '/content/unused_labels',
     '--tile-label-stats-path', str(STATS_PATH),
+    '--checkpoint-dir', str(PERSISTENT_CHECKPOINT_DIR),
     '--metadata-path', str(METADATA_PATH),
     '--train-split-path', str(split_paths['train']),
     '--val-split-path', str(split_paths['val']),
@@ -273,7 +280,9 @@ base_args = [
     '--resize-height', '1392', '--resize-width', '1856', '--crop-height', '1040',
     '--tile-size', '224', '--tile-overlap', '20', '--smoke-threshold', '250',
     '--no-resize-crop-augment',
-    '--batch-size', '1', '--accumulate-grad-batches', '32', '--num-workers', '0',
+    '--batch-size', str(BATCH_SIZE),
+    '--accumulate-grad-batches', str(ACCUMULATE_GRAD_BATCHES),
+    '--num-workers', '0',
     '--tile-loss-type', 'bce', '--bce-pos-weight', '40', '--image-pos-weight', '5',
     '--optimizer-type', 'SGD', '--learning-rate', '0.001', '--optimizer-weight-decay', '0.001',
     '--min-epochs', '1', '--max-epochs', str(MAX_EPOCHS),
@@ -283,10 +292,20 @@ base_args = [
 if RUN_MODE == 'diagnostic':
     base_args.append('--no-stochastic-weight-avg')
 
+RESUME_CKPT = PERSISTENT_CHECKPOINT_DIR / 'last.ckpt'
+if RUN_MODE == 'full' and AUTO_RESUME and RESUME_CKPT.exists():
+    base_args += ['--checkpoint-path', str(RESUME_CKPT)]
+    print('REANUDACION EXACTA DESDE:', RESUME_CKPT)
+else:
+    print('Entrenamiento desde cero.')
+
+print(f'GPU memory: {GPU_MEMORY_GB:.1f} GB')
+print(f'Batch: {BATCH_SIZE}; acumulacion: {ACCUMULATE_GRAD_BATCHES}; batch efectivo: 32')
+print('Checkpoint persistente por epoca:', PERSISTENT_CHECKPOINT_DIR)
 print(' '.join(shlex.quote(str(arg)) for arg in base_args))
 '''),
     code(r'''
-# 8. Entrenar. La salida se muestra en directo y no queda oculta en capture_output.
+# 8. Entrenar. last.ckpt se actualiza en Drive despues de cada epoca.
 env = os.environ.copy()
 env['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 env['PYTHONPATH'] = str(REPO_DIR / 'src')
@@ -296,13 +315,13 @@ print('Entrenamiento terminado correctamente.')
 '''),
     code(r'''
 # 9. Localizar y evaluar el mejor checkpoint explicitamente
-checkpoint_dir = REPO_DIR / 'lightning_logs' / EXPERIMENT_NAME
+checkpoint_dir = PERSISTENT_CHECKPOINT_DIR
 best_candidates = sorted(
-    [p for p in checkpoint_dir.glob('version_*/checkpoints/*.ckpt') if p.name != 'last.ckpt'],
+    [p for p in checkpoint_dir.glob('*.ckpt') if p.name != 'last.ckpt'],
     key=lambda p: p.stat().st_mtime,
 )
 last_candidates = sorted(
-    checkpoint_dir.glob('version_*/checkpoints/last.ckpt'),
+    checkpoint_dir.glob('last.ckpt'),
     key=lambda p: p.stat().st_mtime,
 )
 if not best_candidates:
@@ -316,6 +335,9 @@ print('LAST_CKPT:', LAST_CKPT)
 eval_args = base_args.copy()
 EVAL_EXPERIMENT_NAME = EXPERIMENT_NAME + '_best_test'
 eval_args[eval_args.index('--experiment-name') + 1] = EVAL_EXPERIMENT_NAME
+if '--checkpoint-path' in eval_args:
+    checkpoint_arg_index = eval_args.index('--checkpoint-path')
+    del eval_args[checkpoint_arg_index:checkpoint_arg_index + 2]
 eval_args += ['--checkpoint-path', str(BEST_CKPT), '--is-test-only']
 eval_proc = subprocess.run(
     eval_args,
@@ -363,9 +385,14 @@ shutil.copy2(BEST_CKPT, destination / 'best.ckpt')
 if LAST_CKPT is not None:
     shutil.copy2(LAST_CKPT, destination / 'last.ckpt')
 
-log_source = BEST_CKPT.parents[1]
-for event_file in log_source.glob('events.out.tfevents.*'):
-    shutil.copy2(event_file, destination / event_file.name)
+local_log_versions = sorted(
+    (REPO_DIR / 'lightning_logs' / EXPERIMENT_NAME).glob('version_*'),
+    key=lambda path: path.stat().st_mtime,
+)
+log_source = local_log_versions[-1] if local_log_versions else None
+if log_source is not None:
+    for event_file in log_source.glob('events.out.tfevents.*'):
+        shutil.copy2(event_file, destination / event_file.name)
 if eval_event_files:
     shutil.copy2(eval_event_files[-1], destination / 'best_test_events.tfevents')
 (destination / 'best_test_metrics.json').write_text(

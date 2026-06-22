@@ -75,3 +75,9 @@ component losses and tile F1 improve. Final analysis must compare the best and
 last checkpoints and calibrate the image threshold on validation data before
 reporting test performance. This avoids selecting an early checkpoint solely
 because the fixed-threshold validation error is temporarily flat.
+
+Because the estimated full training time on a T4 is 26-28 hours, the Colab
+workflow stores `last.ckpt` directly in Google Drive after every epoch and
+resumes it exactly across runtime sessions. Session interruption is therefore
+treated as an infrastructure constraint rather than as a reason to shorten the
+experimental protocol.

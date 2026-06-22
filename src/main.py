@@ -197,6 +197,8 @@ parser.add_argument('--accumulate-grad-batches', type=int, default=1,
 # Checkpoint args
 parser.add_argument('--checkpoint-path', type=str, default=None,
                     help='(Optional) Path to checkpoint to load.')
+parser.add_argument('--checkpoint-dir', type=str, default=None,
+                    help='(Optional) Persistent directory where best and last checkpoints are written.')
 
     
 #####################
@@ -294,6 +296,7 @@ def main(# Debug args
 
         # Checkpoint args
         checkpoint_path=None,
+        checkpoint_dir=None,
         checkpoint=None):
     
     print("Experiment: ", experiment_name)
@@ -416,7 +419,11 @@ def main(# Debug args
                                verbose=True)
         callbacks.append(early_stop_callback)
     if not is_debug: 
-        checkpoint_callback = ModelCheckpoint(monitor='val/loss', save_last=True)
+        checkpoint_callback = ModelCheckpoint(
+            monitor='val/loss',
+            save_last=True,
+            dirpath=checkpoint_dir,
+        )
         callbacks.append(checkpoint_callback)
 
         lr_monitor = LearningRateMonitor(logging_interval='epoch')
@@ -582,4 +589,5 @@ if __name__ == '__main__':
     
         # Checkpoint args
         checkpoint_path=args['checkpoint_path'],
+        checkpoint_dir=args['checkpoint_dir'],
         checkpoint=checkpoint)

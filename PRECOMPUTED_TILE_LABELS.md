@@ -94,6 +94,24 @@ The complete Colab workflow is available at
 download, coverage checks, a data-loader smoke test, training, explicit best
 checkpoint evaluation, and persistent checkpoint storage in Google Drive.
 
+## Interrupted Colab sessions
+
+The full experiment can exceed the duration or compute allowance of one Colab
+session. The notebook therefore passes a persistent Google Drive directory via
+`--checkpoint-dir`. Lightning updates `last.ckpt` there after every completed
+epoch. When `RUN_MODE='full'` and `AUTO_RESUME=True`, a later session detects
+that file and passes it through `--checkpoint-path`.
+
+This is an exact Lightning resume: model weights, optimizer state, scheduler,
+epoch number, callback state, and global step are restored. It must not be
+confused with `--is-extra-training`, which loads weights but starts a new
+optimization run. A disconnection can still lose the unfinished current epoch,
+but all completed epochs remain in Drive.
+
+The effective batch remains 32. The notebook uses batch size 1 with gradient
+accumulation 32 on smaller GPUs and batch size 2 with accumulation 16 when at
+least 30 GB of GPU memory is available.
+
 ## Methodological justification for the TFM
 
 Using the official aggregate tile statistics is preferable to generating new
