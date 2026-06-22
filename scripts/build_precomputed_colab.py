@@ -84,7 +84,7 @@ if not all(option in main_text for option in required_cli_options):
     # managed source files from its checked-out commit before applying the full patch.
     for relative_path in ('src/main.py', 'src/dynamic_dataloader.py'):
         committed_content = subprocess.check_output(
-            ['git', 'show', f'HEAD:{relative_path}'],
+            ['git', 'show', f'HEAD:{{relative_path}}'],
             cwd=REPO_DIR,
         )
         (REPO_DIR / relative_path).write_bytes(committed_content)
