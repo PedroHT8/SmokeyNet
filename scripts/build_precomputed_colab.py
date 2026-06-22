@@ -329,11 +329,29 @@ print(' '.join(shlex.quote(str(arg)) for arg in base_args))
 '''),
     code(r'''
 # 8. Entrenar. last.ckpt se actualiza en Drive despues de cada epoca.
+from collections import deque
+
 env = os.environ.copy()
 env['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 env['PYTHONPATH'] = str(REPO_DIR / 'src')
 
-subprocess.run(base_args, cwd=REPO_DIR, env=env, check=True)
+output_tail = deque(maxlen=300)
+train_proc = subprocess.Popen(
+    base_args,
+    cwd=REPO_DIR,
+    env=env,
+    text=True,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+    bufsize=1,
+)
+for line in iter(train_proc.stdout.readline, ''):
+    print(line, end='', flush=True)
+    output_tail.append(line)
+returncode = train_proc.wait()
+if returncode != 0:
+    print('\nULTIMAS LINEAS DEL PROCESO:\n' + ''.join(output_tail)[-30000:])
+    raise RuntimeError(f'Entrenamiento fallido con returncode={returncode}.')
 print('Entrenamiento terminado correctamente.')
 '''),
     code(r'''
