@@ -78,7 +78,16 @@ if not (REPO_DIR / '.git').exists():
     subprocess.run(['git', 'clone', REPO_URL, str(REPO_DIR)], check=True)
 
 main_text = (REPO_DIR / 'src/main.py').read_text(encoding='utf-8')
-if '--tile-label-stats-path' not in main_text:
+required_cli_options = ('--tile-label-stats-path', '--checkpoint-dir')
+if not all(option in main_text for option in required_cli_options):
+    # A reused runtime may contain an older partial patch. Restore only the two
+    # managed source files from its checked-out commit before applying the full patch.
+    for relative_path in ('src/main.py', 'src/dynamic_dataloader.py'):
+        committed_content = subprocess.check_output(
+            ['git', 'show', f'HEAD:{relative_path}'],
+            cwd=REPO_DIR,
+        )
+        (REPO_DIR / relative_path).write_bytes(committed_content)
     patch_text = {repo_patch!r}
     patch_path = Path('/tmp/smokeynet_precomputed_labels.patch')
     patch_path.write_text(patch_text, encoding='utf-8')
@@ -87,9 +96,9 @@ if '--tile-label-stats-path' not in main_text:
         cwd=REPO_DIR,
         check=True,
     )
-    print('Parche de etiquetas precomputadas aplicado.')
+    print('Parche completo de etiquetas y checkpoints aplicado.')
 else:
-    print('El fork ya incluye etiquetas precomputadas; no se aplica parche.')
+    print('El fork ya incluye etiquetas y checkpoints persistentes; no se aplica parche.')
 
 subprocess.run(['git', 'diff', '--check'], cwd=REPO_DIR, check=True)
 '''),
