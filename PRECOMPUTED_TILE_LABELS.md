@@ -112,6 +112,19 @@ The effective batch remains 32. The notebook uses batch size 1 with gradient
 accumulation 32 on smaller GPUs and batch size 2 with accumulation 16 when at
 least 30 GB of GPU memory is available.
 
+## Lightweight MobileNet experiment
+
+Set `MODEL_PRESET='mobilenet'` to replace only the CNN backbone while retaining
+the LSTM, SpatialViT, two-frame input, tile supervision, image supervision, and
+paper data split. The notebook uses the upstream MobileNet embedding size of
+960 instead of the ResNet value of 1000.
+
+MobileNet checkpoints are stored under a distinct experiment name and cannot
+be loaded into ResNet34. This variant should be reported as the lightweight
+SmokeyNet experiment, not as an exact reproduction of the principal ResNet34
+configuration. It is nevertheless an official architecture variant represented
+in the upstream experiment scripts.
+
 ## Methodological justification for the TFM
 
 Using the official aggregate tile statistics is preferable to generating new

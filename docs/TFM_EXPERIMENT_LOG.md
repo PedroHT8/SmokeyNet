@@ -81,3 +81,11 @@ workflow stores `last.ckpt` directly in Google Drive after every epoch and
 resumes it exactly across runtime sessions. Session interruption is therefore
 treated as an infrastructure constraint rather than as a reason to shorten the
 experimental protocol.
+
+## Planned lightweight experiment
+
+Due to Colab compute-unit exhaustion and the estimated ResNet34 runtime, a
+second full experiment uses MobileNet + LSTM + SpatialViT. All data, temporal,
+tiling, loss, optimizer, and effective-batch settings are retained; only the
+CNN backbone and its embedding size change (MobileNet, 960). Results from this
+run must be reported separately from the principal ResNet34 configuration.

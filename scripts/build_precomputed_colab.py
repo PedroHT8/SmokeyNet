@@ -42,7 +42,7 @@ cells = [
     markdown(r'''
 # SmokeyNet con el dataset original y etiquetas oficiales por tile
 
-Este notebook entrena la arquitectura `ResNet34 + LSTM + SpatialViT` con los splits del articulo y `labels_stats_90overlap.pkl`. Las positivas sin estadisticas oficiales se excluyen del entrenamiento; las negativas conservan sus 45 tiles a cero.
+Este notebook entrena `ResNet34 + LSTM + SpatialViT` o su variante ligera `MobileNet + LSTM + SpatialViT` con los splits del articulo y `labels_stats_90overlap.pkl`. Las positivas sin estadisticas oficiales se excluyen del entrenamiento; las negativas conservan sus 45 tiles a cero.
 
 Ejecuta primero `diagnostic`. Cambia a `full` solo cuando el smoke test y una epoca completa terminen correctamente.
 '''),
@@ -55,6 +55,7 @@ import os
 drive.mount('/content/drive')
 
 RUN_MODE = 'diagnostic'  # 'diagnostic' o 'full'
+MODEL_PRESET = 'mobilenet'  # 'mobilenet' o 'resnet34'
 AUTO_RESUME = True  # Reanuda full desde el last.ckpt persistente si existe.
 REPO_URL = 'https://github.com/PedroHT8/SmokeyNet.git'
 REPO_DIR = Path('/content/SmokeyNet')
@@ -63,6 +64,7 @@ DRIVE_ROOT = Path('/content/drive/MyDrive/TFM_SmokeyNet_PaperDataset')
 DRIVE_ROOT.mkdir(parents=True, exist_ok=True)
 
 print('Modo:', RUN_MODE)
+print('Modelo:', MODEL_PRESET)
 print('Checkpoints:', DRIVE_ROOT)
 '''),
     code(f'''
@@ -251,7 +253,26 @@ print('Smoke test correcto.')
 # 7. Argumentos de entrenamiento
 import shlex
 
-EXPERIMENT_NAME = f'smokeynet_paper_precomputed_{RUN_MODE}'
+MODEL_CONFIGS = {
+    'mobilenet': {
+        'components': ['RawToTile_MobileNet', 'TileToTile_LSTM', 'TileToTileImage_SpatialViT'],
+        'tile_embedding_size': 960,
+    },
+    'resnet34': {
+        'components': ['RawToTile_ResNet', 'TileToTile_LSTM', 'TileToTileImage_SpatialViT'],
+        'tile_embedding_size': 1000,
+    },
+}
+if MODEL_PRESET not in MODEL_CONFIGS:
+    raise ValueError(f'MODEL_PRESET no valido: {MODEL_PRESET}')
+MODEL_CONFIG = MODEL_CONFIGS[MODEL_PRESET]
+
+# Preserve the original ResNet experiment path while isolating MobileNet checkpoints.
+EXPERIMENT_NAME = (
+    f'smokeynet_paper_precomputed_{RUN_MODE}'
+    if MODEL_PRESET == 'resnet34'
+    else f'smokeynet_paper_precomputed_mobilenet_{RUN_MODE}'
+)
 MAX_EPOCHS = 2 if RUN_MODE == 'diagnostic' else 25
 GPU_MEMORY_GB = torch.cuda.get_device_properties(0).total_memory / 1024**3
 BATCH_SIZE = 2 if GPU_MEMORY_GB >= 30 else 1
@@ -274,7 +295,7 @@ base_args = [
     '--load-images-from-split',
     '--omit-list', 'omit_no_xml',
     '--error-as-eval-loss',
-    '--model-type-list', 'RawToTile_ResNet', 'TileToTile_LSTM', 'TileToTileImage_SpatialViT',
+    '--model-type-list', *MODEL_CONFIG['components'],
     '--use-image-preds',
     '--series-length', '2',
     '--resize-height', '1392', '--resize-width', '1856', '--crop-height', '1040',
@@ -287,7 +308,8 @@ base_args = [
     '--optimizer-type', 'SGD', '--learning-rate', '0.001', '--optimizer-weight-decay', '0.001',
     '--min-epochs', '1', '--max-epochs', str(MAX_EPOCHS),
     '--no-early-stopping', '--gradient-clip-val', '1.0',
-    '--tile-embedding-size', '1000', '--backbone-size', 'small',
+    '--tile-embedding-size', str(MODEL_CONFIG['tile_embedding_size']),
+    '--backbone-size', 'small',
 ]
 if RUN_MODE == 'diagnostic':
     base_args.append('--no-stochastic-weight-avg')
@@ -300,6 +322,7 @@ else:
     print('Entrenamiento desde cero.')
 
 print(f'GPU memory: {GPU_MEMORY_GB:.1f} GB')
+print('Arquitectura:', ' + '.join(MODEL_CONFIG['components']))
 print(f'Batch: {BATCH_SIZE}; acumulacion: {ACCUMULATE_GRAD_BATCHES}; batch efectivo: 32')
 print('Checkpoint persistente por epoca:', PERSISTENT_CHECKPOINT_DIR)
 print(' '.join(shlex.quote(str(arg)) for arg in base_args))
