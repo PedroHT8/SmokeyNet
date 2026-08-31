@@ -37,6 +37,7 @@ class DynamicDataModule(pl.LightningDataModule):
                  
                  raw_data_path=None, 
                  labels_path=None, 
+                 tile_label_stats_path=None,
                  metadata_path='./data/metadata.pkl',
                  optical_flow_path=None,
                  
@@ -85,6 +86,13 @@ class DynamicDataModule(pl.LightningDataModule):
            
         self.raw_data_path = raw_data_path
         self.labels_path = labels_path
+        self.tile_label_stats_path = tile_label_stats_path
+        self.tile_label_stats = None
+        if tile_label_stats_path is not None:
+            with open(tile_label_stats_path, 'rb') as stats_file:
+                self.tile_label_stats = pickle.load(stats_file)
+            if not isinstance(self.tile_label_stats, dict):
+                raise TypeError('tile_label_stats_path must contain a dictionary keyed by image name.')
         self.metadata = pickle.load(open(metadata_path, 'rb'))
         self.optical_flow_path = optical_flow_path
         
@@ -116,6 +124,30 @@ class DynamicDataModule(pl.LightningDataModule):
         self.blur_augment = blur_augment
         self.color_augment = color_augment
         self.brightness_contrast_augment = brightness_contrast_augment
+
+        if self.tile_label_stats is not None:
+            if self.is_object_detection:
+                raise ValueError('Precomputed tile labels are only supported by tile-classification models.')
+            if self.num_tile_samples > 0:
+                raise ValueError('Precomputed tile labels do not support --num-tile-samples.')
+            paper_geometry = ((1392, 1856), 1040, (224, 224), 20)
+            configured_geometry = (
+                self.resize_dimensions,
+                self.crop_height,
+                self.tile_dimensions,
+                self.tile_overlap,
+            )
+            if configured_geometry != paper_geometry:
+                raise ValueError(
+                    'labels_stats_90overlap.pkl requires paper geometry: '
+                    'resize=(1392, 1856), crop_height=1040, '
+                    'tile_dimensions=(224, 224), tile_overlap=20.'
+                )
+            if self.resize_crop_augment:
+                raise ValueError(
+                    'Precomputed tile labels require fixed paper geometry. '
+                    'Disable random crop jitter with --no-resize-crop-augment.'
+                )
         
         self.has_setup = False
         
@@ -187,6 +219,46 @@ class DynamicDataModule(pl.LightningDataModule):
                 np.savetxt(log_dir+'/train_images.txt', self.train_split, fmt='%s')
                 np.savetxt(log_dir+'/val_images.txt', self.val_split, fmt='%s')
                 np.savetxt(log_dir+'/test_images.txt', self.test_split, fmt='%s')
+
+        if self.tile_label_stats is not None:
+            expected_num_tiles = util_fns.calculate_num_tiles(
+                self.resize_dimensions,
+                self.crop_height,
+                self.tile_dimensions,
+                self.tile_overlap)
+            expected_num_tiles = expected_num_tiles[0] * expected_num_tiles[1]
+            invalid_stats = [
+                image_name for image_name, counts in self.tile_label_stats.items()
+                if len(counts) != expected_num_tiles
+            ]
+            if invalid_stats:
+                raise ValueError(
+                    f'Precomputed labels do not match the configured grid of '
+                    f'{expected_num_tiles} tiles. Invalid entries: {invalid_stats[:5]}'
+                )
+
+            train_before = len(self.train_split)
+            missing_positive_stats = [
+                image_name for image_name in self.train_split
+                if util_fns.get_ground_truth_label(image_name) == 1
+                and image_name not in self.tile_label_stats
+            ]
+            if missing_positive_stats:
+                missing_set = set(missing_positive_stats)
+                self.train_split = [
+                    image_name for image_name in self.train_split
+                    if image_name not in missing_set
+                ]
+
+            covered_positives = sum(
+                util_fns.get_ground_truth_label(image_name) == 1
+                for image_name in self.train_split
+            )
+            negatives = len(self.train_split) - covered_positives
+            print('Precomputed tile-label summary:')
+            print(f'- grid: {expected_num_tiles} tiles')
+            print(f'- train images: {len(self.train_split)} ({covered_positives} positive, {negatives} negative)')
+            print(f'- removed positive images without tile labels: {train_before - len(self.train_split)}')
         
         self.has_setup = True
         print("Setting Up Data Complete.")
@@ -195,6 +267,7 @@ class DynamicDataModule(pl.LightningDataModule):
     def train_dataloader(self):
         train_dataset = DynamicDataloader(raw_data_path=self.raw_data_path,
                                           labels_path=self.labels_path, 
+                                          tile_label_stats=self.tile_label_stats,
                                           optical_flow_path=self.optical_flow_path,
                                           split_name='train',
                                           
@@ -231,6 +304,7 @@ class DynamicDataModule(pl.LightningDataModule):
     def val_dataloader(self):
         val_dataset = DynamicDataloader(raw_data_path=self.raw_data_path, 
                                           labels_path=self.labels_path, 
+                                          tile_label_stats=self.tile_label_stats,
                                           optical_flow_path=self.optical_flow_path,
                                           split_name='val',
                                         
@@ -266,6 +340,7 @@ class DynamicDataModule(pl.LightningDataModule):
     def test_dataloader(self):
         test_dataset = DynamicDataloader(raw_data_path=self.raw_data_path, 
                                           labels_path=self.labels_path, 
+                                          tile_label_stats=self.tile_label_stats,
                                           optical_flow_path=self.optical_flow_path,
                                           split_name='test',
                                          
@@ -308,6 +383,7 @@ class DynamicDataloader(Dataset):
     def __init__(self, 
                  raw_data_path=None,
                  labels_path=None, 
+                 tile_label_stats=None,
                  optical_flow_path=None,
                  split_name='train',
                  
@@ -335,6 +411,7 @@ class DynamicDataloader(Dataset):
         
         self.raw_data_path = raw_data_path
         self.labels_path = labels_path
+        self.tile_label_stats = tile_label_stats
         self.optical_flow_path = optical_flow_path
         self.split_name = split_name
         
@@ -386,10 +463,10 @@ class DynamicDataloader(Dataset):
         for file_name in self.metadata['image_series'][image_name]:
             # Load image
             # img.shape = [height, width, num_channels]
-            if Path(self.raw_data_path+'/'+file_name+'.jpg').exists():
-                img = cv2.imread(self.raw_data_path+'/'+file_name+'.jpg')
-            else:
-                img = cv2.imread('/userdata/kerasData/data/new_data/raw_images_20211031/'+file_name+'.jpg')
+            img_path = Path(self.raw_data_path) / f"{file_name}.jpg"
+            if not img_path.exists():
+                raise FileNotFoundError(f"No se encontró la imagen: {img_path}")
+            img = cv2.imread(str(img_path))
                 
             # Apply data augmentations
             # img.shape = [crop_height, resize_dimensions[1], num_channels]
@@ -423,18 +500,37 @@ class DynamicDataloader(Dataset):
         
         ### Load Tile Labels ###
         if self.is_maskrcnn or not self.is_object_detection:
-            label_path = self.labels_path+'/'+image_name+'.npy'
-            if Path(label_path).exists():
+            has_precomputed_labels = (
+                not self.is_object_detection
+                and self.tile_label_stats is not None
+                and image_name in self.tile_label_stats
+            )
+            if has_precomputed_labels:
+                tile_counts = np.asarray(self.tile_label_stats[image_name])
+                tiled_labels = (tile_counts > self.smoke_threshold).astype(float)
+
+                # Images and tiles are flattened row-major, so a horizontal flip
+                # reverses the tile columns while preserving row order.
+                if data_augmentations.should_flip:
+                    tiled_labels = tiled_labels.reshape(
+                        self.num_tiles_height, self.num_tiles_width
+                    )[:, ::-1].reshape(-1).copy()
+
+                omit_mask = True
+            else:
+                label_path = None if self.labels_path is None else Path(self.labels_path) / f'{image_name}.npy'
+
+            if not has_precomputed_labels and label_path is not None and label_path.exists():
                 # Repeat similar steps to images
                 labels = np.load(label_path)
 
                 labels = data_augmentations(labels, is_labels=True)
-            else:
+            elif not has_precomputed_labels:
                 # Load all 0s
                 # labels.shape = [height, width]
                 labels = np.zeros((self.crop_height, self.resize_dimensions[1])).astype(float) 
 
-            if not self.is_object_detection:
+            if not self.is_object_detection and not has_precomputed_labels:
                 # Tile labels
                 tiled_labels = util_fns.tile_labels(labels, self.num_tiles_height, self.num_tiles_width, self.resize_dimensions, self.tile_dimensions, self.tile_overlap)
 

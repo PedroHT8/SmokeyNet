@@ -9,7 +9,7 @@ Description: Kicks off training and evaluation. Contains many command line argum
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
-from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, StochasticWeightAveraging
 from pytorch_lightning.loggers import TensorBoardLogger
 
 # Other package imports
@@ -62,6 +62,8 @@ parser.add_argument('--raw-data-path', type=str, default='/root/raw_images',
                     help='Path to raw images.')
 parser.add_argument('--labels-path', type=str, default='/root/drive_clone_numpy',
                     help='Path to processed XML labels.')
+parser.add_argument('--tile-label-stats-path', type=str, default=None,
+                    help='Optional pickle containing per-image smoke-pixel counts for each tile. Positive training images without an entry are omitted.')
 parser.add_argument('--metadata-path', type=str, default='./data/metadata.pkl',
                     help='Path to metadata.pkl.')
 parser.add_argument('--optical-flow-path', type=str, default=None,
@@ -77,10 +79,10 @@ parser.add_argument('--load-images-from-split', action='store_true',
                     help='If images should be loaded exactly from split (as opposed to fires)')
 
 # Dataloader args
-parser.add_argument('--train-split-size', type=int, default=0.7,
-                    help='% of data to split for train. Only used when not loading pre-created splits.')
-parser.add_argument('--test-split-size', type=int, default=0.15,
-                    help='% of data to split for test. Only used when not loading pre-created splits.')
+parser.add_argument('--train-split-size', type=float, default=0.7,
+                    help='%% of data to split for train. Only used when not loading pre-created splits.')
+parser.add_argument('--test-split-size', type=float, default=0.15,
+                    help='%% of data to split for test. Only used when not loading pre-created splits.')
 parser.add_argument('--batch-size', type=int, default=1,
                     help='Batch size for training.')
 parser.add_argument('--num-workers', type=int, default=4,
@@ -195,6 +197,8 @@ parser.add_argument('--accumulate-grad-batches', type=int, default=1,
 # Checkpoint args
 parser.add_argument('--checkpoint-path', type=str, default=None,
                     help='(Optional) Path to checkpoint to load.')
+parser.add_argument('--checkpoint-dir', type=str, default=None,
+                    help='(Optional) Persistent directory where best and last checkpoints are written.')
 
     
 #####################
@@ -215,6 +219,7 @@ def main(# Debug args
         # Path args
         raw_data_path=None, 
         labels_path=None, 
+        tile_label_stats_path=None,
         metadata_path=None,
         optical_flow_path=None,
     
@@ -291,6 +296,7 @@ def main(# Debug args
 
         # Checkpoint args
         checkpoint_path=None,
+        checkpoint_dir=None,
         checkpoint=None):
     
     print("Experiment: ", experiment_name)
@@ -308,6 +314,7 @@ def main(# Debug args
         # Path args
         raw_data_path=raw_data_path,
         labels_path=labels_path,
+        tile_label_stats_path=tile_label_stats_path,
         metadata_path=metadata_path,
         optical_flow_path=optical_flow_path,
         
@@ -412,11 +419,19 @@ def main(# Debug args
                                verbose=True)
         callbacks.append(early_stop_callback)
     if not is_debug: 
-        checkpoint_callback = ModelCheckpoint(monitor='val/loss', save_last=True)
+        checkpoint_callback = ModelCheckpoint(
+            monitor='val/loss',
+            save_last=True,
+            dirpath=checkpoint_dir,
+        )
         callbacks.append(checkpoint_callback)
 
         lr_monitor = LearningRateMonitor(logging_interval='epoch')
         callbacks.append(lr_monitor)
+
+    if stochastic_weight_avg:
+        swa_callback = StochasticWeightAveraging(swa_lrs=1e-2)
+        callbacks.append(swa_callback)
 
     ### Initialize Trainer ###
 
@@ -434,15 +449,13 @@ def main(# Debug args
         min_epochs=min_epochs,
         max_epochs=max_epochs,
         callbacks=callbacks,
-        precision=16 if sixteen_bit else 32,
-        stochastic_weight_avg=stochastic_weight_avg,
+        precision="16-mixed" if sixteen_bit else 32,
         gradient_clip_val=gradient_clip_val,
         accumulate_grad_batches=accumulate_grad_batches,
 
         # Other args
-        resume_from_checkpoint=checkpoint_path if not is_extra_training else None,
         logger=logger if not is_debug else False,
-        log_every_n_steps=512/(batch_size*accumulate_grad_batches),
+        log_every_n_steps=max(1, 512 // (batch_size * accumulate_grad_batches)),
 #             val_check_interval=0.5,
 
         # Dev args
@@ -456,13 +469,16 @@ def main(# Debug args
 #             weights_summary='full',
 #             profiler="simple", # "advanced" "pytorch"
 #             log_gpu_memory=True,
-        gpus=1)
+        accelerator="gpu",
+        devices=1)
 
     ### Training & Evaluation ###
+    ckpt_path_for_fit = checkpoint_path if (checkpoint_path is not None and not is_extra_training) else None
+
     if is_test_only:
-        trainer.test(lightning_module, datamodule=data_module)
+        trainer.test(lightning_module, datamodule=data_module, ckpt_path=checkpoint_path)
     else:
-        trainer.fit(lightning_module, datamodule=data_module)
+        trainer.fit(lightning_module, datamodule=data_module, ckpt_path=ckpt_path_for_fit)
         trainer.test(lightning_module, datamodule=data_module)
     
     
@@ -495,6 +511,7 @@ if __name__ == '__main__':
         # Path args - always used command line args for these
         raw_data_path=args['raw_data_path'],
         labels_path=args['labels_path'], 
+        tile_label_stats_path=args['tile_label_stats_path'],
         metadata_path=args['metadata_path'],
         optical_flow_path=args['optical_flow_path'],
         
@@ -572,4 +589,5 @@ if __name__ == '__main__':
     
         # Checkpoint args
         checkpoint_path=args['checkpoint_path'],
+        checkpoint_dir=args['checkpoint_dir'],
         checkpoint=checkpoint)

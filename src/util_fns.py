@@ -15,7 +15,7 @@ import cv2
 from pathlib import Path
 import xml.etree.ElementTree as ET
 import numpy as np
-from torch._six import string_classes
+string_classes = (str, bytes)
 import collections
 import re
 import copy

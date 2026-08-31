@@ -95,3 +95,10 @@ Logs can be accessed using Tensorboard: ```tensorboard --logdir ./lightning_logs
 
 # License
 This repository is released under the Apache 2.0 license. Please see the LICENSE file for more information.
+
+
+## TFM modifications
+
+This fork includes compatibility and reproducibility modifications developed for the associated Master's Thesis. The architecture of the ViT-based SmokeyNet baseline remains unchanged with respect to the original implementation.
+
+A detailed description of the modifications is available in [TFM_CHANGES.md](TFM_CHANGES.md).

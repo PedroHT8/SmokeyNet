@@ -118,6 +118,7 @@ class MainModel(nn.Module):
         tile_probs = None
         tile_preds = None
         image_preds = None
+        image_probs = None
         
         # Compute forward pass and loss for each model in model_list
         for i, model in enumerate(self.model_list):
@@ -234,6 +235,7 @@ class MainModel(nn.Module):
             image_preds = (image_probs > 0.5).int()
         # Else, use tile_preds to determine image_preds
         elif tile_outputs is not None:
+            image_probs = tile_probs.max(dim=1).values
             image_preds = (tile_preds.sum(dim=1) > 0).int()
         
         # If error_as_eval_loss, replace total_loss with number of errors
