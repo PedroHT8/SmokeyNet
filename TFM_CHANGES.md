@@ -12,24 +12,31 @@ A. Dewangan et al., *Smoke Detection for Early Wildfire Using Deep Learning*, Re
 
 The modifications described below were introduced to reproduce and evaluate SmokeyNet in a modern Google Colab environment and to recover tile-level supervision using the precomputed statistics available for the original dataset.
 
-Unless otherwise stated, these modifications do not alter the architecture of the ViT-based SmokeyNet baseline.
+Two TFM branches are maintained:
+
+* `tfm/smokeynet-vit`: reproducible ViT-based SmokeyNet baseline.
+* `tfm/smokeynet-mamba`: extension of the previous branch replacing the Spatial Vision Transformer with a Mamba-based spatial module.
+
+Unless otherwise stated, the compatibility and data-processing modifications described in Sections 2–8 do not alter the architecture of the ViT-based SmokeyNet baseline.
 
 ## 2. Scope of the modifications
 
-The original SmokeyNet architecture is preserved:
+The original SmokeyNet baseline architecture is preserved in `tfm/smokeynet-vit`:
 
 * CNN-based feature extraction at tile level.
 * LSTM-based temporal modelling.
 * Spatial Vision Transformer for spatial aggregation.
 * Original tile-level and image-level prediction structure.
 
-The changes introduced in this fork are limited to:
+The common changes introduced in this fork are limited to:
 
 1. Compatibility with current versions of PyTorch, PyTorch Lightning and TorchMetrics.
 2. Minor corrections required for execution and evaluation.
 3. Support for precomputed tile-level supervision.
 4. Removal of machine-specific data paths.
 5. Persistent checkpoint storage and training resumption.
+
+The branch `tfm/smokeynet-mamba` additionally introduces one architectural modification: replacement of `TileToTileImage_SpatialViT` with the Mamba-based `TileToTileImage_SpatialVim` module described in Section 10.
 
 ## 3. PyTorch compatibility
 
@@ -268,9 +275,9 @@ using the current PyTorch Lightning `ckpt_path` interface.
 
 Checkpoint-based resumption restores the model and training state managed by PyTorch Lightning.
 
-## 9. Architectural impact
+## 9. Architectural impact of the ViT baseline
 
-For the ViT baseline used in the experiments, the changes described in this document do **not** replace or redesign the principal architectural components of SmokeyNet.
+For the ViT baseline used in the experiments, the changes described in Sections 2–8 do **not** replace or redesign the principal architectural components of SmokeyNet.
 
 In particular, the following components remain those of the original implementation:
 
@@ -279,19 +286,293 @@ In particular, the following components remain those of the original implementat
 * Spatial Vision Transformer;
 * tile/image prediction hierarchy.
 
-The principal methodological modification is therefore related to how tile-level training supervision is recovered and supplied to the original model, rather than to a redesign of the ViT-based architecture.
+The principal methodological modification of `tfm/smokeynet-vit` is therefore related to how tile-level training supervision is recovered and supplied to the original model, rather than to a redesign of the architecture.
 
-A separate architectural extension replacing the Spatial Vision Transformer with a Mamba-based module can be documented independently if incorporated into this repository.
+## 10. Mamba-based architectural extension
 
-## 10. Summary of modified source files
+### 10.1 Motivation
 
-| File                        | Purpose of modification                                                                         |
-| --------------------------- | ----------------------------------------------------------------------------------------------- |
-| `.gitignore`                | Prevent local Python caches and virtual environments from being versioned                       |
-| `src/util_fns.py`           | Compatibility with current PyTorch versions                                                     |
-| `src/lightning_module.py`   | TorchMetrics and PyTorch Lightning compatibility                                                |
-| `src/main.py`               | Modern Lightning API, tile-label configuration, argument corrections and persistent checkpoints |
-| `src/main_model.py`         | Reliable image-level probability handling                                                       |
-| `src/dynamic_dataloader.py` | Portable image loading and precomputed tile-level supervision                                   |
+The branch `tfm/smokeynet-mamba` implements an architectural variant in which the original spatial aggregation module:
 
-These changes provide a reproducible modern implementation while preserving the architecture of the original ViT-based SmokeyNet baseline.
+```text
+TileToTileImage_SpatialViT
+```
+
+is replaced with:
+
+```text
+TileToTileImage_SpatialVim
+```
+
+The preceding components remain unchanged:
+
+```text
+RawToTile_MobileNet
+        ↓
+TileToTile_LSTM
+        ↓
+TileToTileImage_SpatialVim
+```
+
+The purpose of this variant is to compare the original Transformer-based spatial processing with a state-space-model-based alternative while preserving the rest of the SmokeyNet processing pipeline.
+
+### 10.2 Input and output contract
+
+The LSTM produces tile embeddings with shape:
+
+```text
+[B, 45, T, 960]
+```
+
+where:
+
+* `B` is the batch size;
+* `45` corresponds to the 5 × 9 spatial tile grid;
+* `T` is the temporal sequence length;
+* `960` is the embedding dimension produced by the MobileNet/LSTM pipeline.
+
+`TileToTileImage_SpatialVim` preserves the same external prediction structure expected by SmokeyNet:
+
+```text
+tile_outputs  [B, 45, T]
+image_outputs [B, T]
+```
+
+This allows the existing losses, evaluation pipeline and image/tile prediction hierarchy to remain unchanged.
+
+### 10.3 Projection to the spatial latent representation
+
+The 960-dimensional LSTM embeddings are projected to 516 dimensions:
+
+```python
+self.input_projection = nn.Linear(
+    tile_embedding_size,
+    vim_d_model,
+)
+```
+
+with:
+
+```text
+tile_embedding_size = 960
+vim_d_model = 516
+```
+
+The value 516 was selected to preserve the latent dimensionality used by the original `SpatialViT`, whose `ViTConfig` uses:
+
+```python
+hidden_size=516
+```
+
+and whose prediction head is:
+
+```python
+TileEmbeddingsToOutput(516)
+```
+
+The Mamba-based variant therefore retains a 516-dimensional spatial representation before the common SmokeyNet prediction head.
+
+### 10.4 Spatial sequence construction
+
+Spatial processing is performed independently for every temporal position.
+
+The embeddings are reorganised from:
+
+```text
+[B, N, T, D]
+```
+
+to:
+
+```text
+[B*T, N, D]
+```
+
+so that the 45 tiles form the sequence processed by the spatial module.
+
+The tiles retain their raster ordering.
+
+A learned CLS token is inserted in the centre of the sequence:
+
+```text
+22 tiles + CLS + 23 tiles
+```
+
+Learned absolute positional embeddings are then added to the 45 tile tokens and the CLS token.
+
+### 10.5 Mamba blocks and bidirectional processing
+
+The Mamba mixer used inside the module is imported from the official `mamba-ssm` package:
+
+```python
+from mamba_ssm import Mamba
+```
+
+The implementation does not reproduce the internal Selective State Space Model operations.
+
+Each `_VimMambaBlock` follows a non-fused:
+
+```text
+Add -> Norm -> Mixer
+```
+
+data flow and uses PyTorch `LayerNorm`.
+
+Four Mamba layers are instantiated and consumed as two bidirectional pairs:
+
+```text
+Pair 1:
+    layer 0 -> forward spatial order
+    layer 1 -> reversed spatial order
+
+Pair 2:
+    layer 2 -> forward spatial order
+    layer 3 -> reversed spatial order
+```
+
+For the backward branch, the token sequence is reversed before the Mamba layer and restored to its original order afterwards.
+
+The representations obtained from both directions are then combined:
+
+```text
+forward + reverse(backward)
+```
+
+The same bidirectional combination is applied to the residual stream.
+
+This processing strategy is based on the bidirectional sequence-processing approach used by Vision Mamba (Vim).
+
+### 10.6 Global and tile-level predictions
+
+After the final residual addition and `LayerNorm`, the central CLS token is used as the global image representation.
+
+The remaining 45 contextualised tokens retain the original tile ordering and are used as local spatial representations.
+
+The embeddings are reconstructed following the same convention as `SpatialViT`:
+
+```text
+[CLS, tile1, ..., tile45]
+```
+
+and passed through:
+
+```python
+TileEmbeddingsToOutput(516)
+```
+
+The first output corresponds to the image prediction and the remaining 45 outputs correspond to tile predictions.
+
+### 10.7 SpatialVim configuration
+
+The implementation used in the TFM experiments uses:
+
+```text
+d_model = 516
+d_state = 16
+d_conv = 4
+expand = 2
+depth = 4
+pos_dropout = 0.0
+drop_path = 0.0
+residual_in_fp32 = True
+```
+
+With `depth=4`, the module contains two bidirectional forward/backward Mamba pairs.
+
+### 10.8 Provenance of the implementation
+
+The Mamba-based extension combines three sources:
+
+**Original SmokeyNet**
+
+The following components and interfaces are retained from the original implementation:
+
+* MobileNet tile feature extraction;
+* LSTM temporal processing;
+* 5 × 9 tile organisation;
+* tile/image prediction hierarchy;
+* `TileEmbeddingsToOutput`.
+
+**Official Mamba implementation**
+
+The core Mamba mixer is provided by the official `mamba-ssm` package.
+
+The Selective State Space Model itself is therefore not reimplemented in this repository.
+
+**Vision Mamba-inspired adaptation**
+
+The following design elements are based on the Vision Mamba (Vim) approach:
+
+* Add → Norm → Mixer block organisation;
+* separate residual stream;
+* central CLS token;
+* positional embeddings;
+* bidirectional forward/backward processing.
+
+The adaptation connecting these elements to the SmokeyNet LSTM embeddings and reconstructing the original SmokeyNet tile/image outputs was developed specifically for this TFM.
+
+The resulting module should therefore be described as a **Mamba-based spatial extension of SmokeyNet inspired by Vision Mamba**, rather than as a complete implementation of Vision Mamba or VMamba.
+
+## 11. Validation of the Mamba integration
+
+The branch `tfm/smokeynet-mamba` was first verified using a direct forward-pass test of `TileToTileImage_SpatialVim`.
+
+For an input tensor with shape:
+
+```text
+[1, 45, 2, 960]
+```
+
+the module produced:
+
+```text
+tile_outputs:  [1, 45, 2]
+image_outputs: [1, 2]
+```
+
+The complete integration was subsequently tested using real FIgLib images and the same geometry used for the ViT baseline:
+
+* resize: 1392 × 1856;
+* crop height: 1040;
+* tile size: 224 × 224;
+* tile overlap: 20;
+* spatial grid: 5 × 9 = 45 tiles;
+* sequence length: 2.
+
+The smoke test included:
+
+* `RawToTile_MobileNet`;
+* `TileToTile_LSTM`;
+* `TileToTileImage_SpatialVim`;
+* precomputed tile-level labels;
+* mixed-precision training;
+* one complete training epoch;
+* validation;
+* test evaluation;
+* checkpoint generation.
+
+The validated implementation corresponds to commit:
+
+```text
+1576abf22d84a09bc27ba4f339bf27d527fc9f40
+```
+
+The execution completed with exit code `0`, generated `last.ckpt` successfully and left the cloned repository without local source-code modifications.
+
+The numerical metrics obtained in this smoke test are not intended as performance results because of the deliberately reduced dataset and single training epoch. Its purpose was exclusively to verify the correct end-to-end integration of the new spatial module.
+
+## 12. Summary of modified source files
+
+| File                        | Purpose of modification                                                                                 |
+| --------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `.gitignore`                | Prevent local Python caches and virtual environments from being versioned                               |
+| `src/util_fns.py`           | Compatibility with current PyTorch versions                                                             |
+| `src/lightning_module.py`   | TorchMetrics and PyTorch Lightning compatibility                                                        |
+| `src/main.py`               | Modern Lightning API, tile-label configuration, argument corrections and persistent checkpoints         |
+| `src/main_model.py`         | Reliable image-level probability handling                                                               |
+| `src/dynamic_dataloader.py` | Portable image loading and precomputed tile-level supervision                                           |
+| `src/model_components.py`   | Adds the optional Mamba dependency and `TileToTileImage_SpatialVim` in the `tfm/smokeynet-mamba` branch |
+
+The branch `tfm/smokeynet-vit` provides the reproducible modern implementation of the original ViT-based SmokeyNet architecture.
+
+The branch `tfm/smokeynet-mamba` extends that baseline with the Mamba-based spatial module while preserving the MobileNet, LSTM, supervision, loss and evaluation pipeline used by the ViT baseline.

@@ -99,6 +99,11 @@ This repository is released under the Apache 2.0 license. Please see the LICENSE
 
 ## TFM modifications
 
-This fork includes compatibility and reproducibility modifications developed for the associated Master's Thesis. The architecture of the ViT-based SmokeyNet baseline remains unchanged with respect to the original implementation.
+This fork includes compatibility, reproducibility and data-supervision modifications developed for the associated Master's Thesis.
+
+The TFM experiments use two dedicated branches:
+
+- tfm/smokeynet-vit: adapted baseline preserving the original MobileNet + LSTM + SpatialViT architecture.
+- tfm/smokeynet-mamba: extension of the previous branch replacing SpatialViT with the Mamba-based TileToTileImage_SpatialVim module.
 
 A detailed description of the modifications is available in [TFM_CHANGES.md](TFM_CHANGES.md).
