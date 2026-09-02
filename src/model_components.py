@@ -32,6 +32,13 @@ from gtrxl_torch.gtrxl_torch import GTrXL
 import numpy as np
 import math
 
+# Optional Mamba dependency.
+# The original ViT architecture remains available without mamba-ssm.
+try:
+    from mamba_ssm import Mamba
+except ImportError:
+    Mamba = None
+
 # File imports
 import resnet
 import util_fns
@@ -884,7 +891,482 @@ class TileToTileImage_SpatialViT(nn.Module):
         tile_outputs = tile_outputs[:,1:]
         
         return tile_outputs, image_outputs
-    
+
+class _VimMambaBlock(nn.Module):
+    """
+    Non-fused adaptation of the Vision Mamba block.
+
+    It follows the Vim Add -> Norm -> Mixer data flow while
+    using PyTorch LayerNorm and the official mamba_ssm.Mamba
+    implementation.
+    """
+
+    def __init__(
+        self,
+        d_model=516,
+        d_state=16,
+        d_conv=4,
+        expand=2,
+        drop_path=0.0,
+        residual_in_fp32=True,
+        layer_idx=None,
+    ):
+        super().__init__()
+
+        if Mamba is None:
+            raise ImportError(
+                'mamba-ssm is required to use SpatialVim.'
+            )
+
+        if drop_path != 0.0:
+            raise ValueError(
+                'SpatialVim currently supports '
+                'drop_path=0.0 only.'
+            )
+
+        self.residual_in_fp32 = residual_in_fp32
+
+        self.norm = nn.LayerNorm(
+            d_model
+        )
+
+        self.mixer = Mamba(
+            d_model=d_model,
+            d_state=d_state,
+            d_conv=d_conv,
+            expand=expand,
+            layer_idx=layer_idx,
+        )
+
+        self.drop_path = nn.Identity()
+
+    def forward(
+        self,
+        hidden_states,
+        residual=None,
+    ):
+        if residual is None:
+            residual = hidden_states
+        else:
+            residual = (
+                residual
+                + self.drop_path(hidden_states)
+            )
+
+        hidden_states = self.norm(
+            residual.to(
+                dtype=self.norm.weight.dtype
+            )
+        )
+
+        if self.residual_in_fp32:
+            residual = residual.float()
+
+        hidden_states = self.mixer(
+            hidden_states
+        )
+
+        return hidden_states, residual
+
+
+class TileToTileImage_SpatialVim(nn.Module):
+    """
+    Vision-Mamba-style spatial replacement for SmokeyNet SpatialViT.
+
+    Input:
+        [B, 45, T, 960]
+
+    Outputs:
+        tile_outputs:  [B, 45, T]
+        image_outputs: [B, T]
+
+    The 960-dimensional LSTM embeddings are projected to the
+    516-dimensional latent space used by the original SpatialViT.
+
+    The 45 raster-ordered tile tokens are processed together with
+    a learned central CLS token and absolute positional embeddings.
+
+    Mamba layers are arranged in forward/backward pairs following
+    the bidirectional processing strategy used by Vision Mamba.
+    """
+
+    def __init__(
+        self,
+        num_tiles_height=5,
+        num_tiles_width=9,
+        tile_embedding_size=960,
+        vim_d_model=516,
+        vim_d_state=16,
+        vim_d_conv=4,
+        vim_expand=2,
+        vim_depth=4,
+        vim_pos_dropout=0.0,
+        vim_drop_path=0.0,
+        vim_residual_in_fp32=True,
+        **kwargs
+    ):
+        print('- TileToTileImage_SpatialVim')
+        super().__init__()
+
+        if Mamba is None:
+            raise ImportError(
+                'mamba-ssm is not installed. '
+                'Install it before using SpatialVim.'
+            )
+
+        if vim_depth <= 0 or vim_depth % 2 != 0:
+            raise ValueError(
+                'SpatialVim requires an even vim_depth > 0 '
+                'for forward/backward layer pairs.'
+            )
+
+        self.num_tiles_height = num_tiles_height
+        self.num_tiles_width = num_tiles_width
+
+        self.num_tiles = (
+            num_tiles_height
+            * num_tiles_width
+        )
+
+        self.tile_embedding_size = (
+            tile_embedding_size
+        )
+
+        self.vim_d_model = vim_d_model
+        self.vim_depth = vim_depth
+
+        # Central position for the CLS token:
+        # 22 tiles + CLS + 23 tiles.
+        self.cls_position = (
+            self.num_tiles // 2
+        )
+
+        # Adapt the 960-dimensional LSTM embeddings to the
+        # 516-dimensional latent space used by SpatialViT.
+        self.input_projection = nn.Linear(
+            tile_embedding_size,
+            vim_d_model,
+        )
+
+        self.input_projection, = (
+            util_fns.init_weights_Xavier(
+                self.input_projection
+            )
+        )
+
+        # Learned central CLS token.
+        self.cls_token = nn.Parameter(
+            torch.zeros(
+                1,
+                1,
+                vim_d_model,
+            )
+        )
+
+        nn.init.trunc_normal_(
+            self.cls_token,
+            std=0.02,
+        )
+
+        # Absolute positional embeddings:
+        # 45 tile tokens + 1 CLS token.
+        self.position_embeddings = nn.Parameter(
+            torch.zeros(
+                1,
+                self.num_tiles + 1,
+                vim_d_model,
+            )
+        )
+
+        nn.init.trunc_normal_(
+            self.position_embeddings,
+            std=0.02,
+        )
+
+        self.pos_drop = nn.Dropout(
+            vim_pos_dropout
+        )
+
+        # Four Mamba layers with depth=4:
+        #   layers 0/1 -> bidirectional pair 1
+        #   layers 2/3 -> bidirectional pair 2
+        self.layers = nn.ModuleList([
+            _VimMambaBlock(
+                d_model=vim_d_model,
+                d_state=vim_d_state,
+                d_conv=vim_d_conv,
+                expand=vim_expand,
+                drop_path=vim_drop_path,
+                residual_in_fp32=vim_residual_in_fp32,
+                layer_idx=layer_idx,
+            )
+            for layer_idx in range(vim_depth)
+        ])
+
+        self.norm_f = nn.LayerNorm(
+            vim_d_model
+        )
+
+        # Reuse the original SmokeyNet output head.
+        self.embeddings_to_output = (
+            TileEmbeddingsToOutput(
+                vim_d_model
+            )
+        )
+
+    def forward(
+        self,
+        tile_embeddings,
+        **kwargs
+    ):
+        tile_embeddings = (
+            tile_embeddings.float()
+        )
+
+        (
+            batch_size,
+            num_tiles,
+            series_length,
+            tile_embedding_size,
+        ) = tile_embeddings.size()
+
+        if num_tiles != self.num_tiles:
+            raise ValueError(
+                f'SpatialVim expected '
+                f'{self.num_tiles} tiles '
+                f'({self.num_tiles_height}x'
+                f'{self.num_tiles_width}), '
+                f'but received {num_tiles}.'
+            )
+
+        if (
+            tile_embedding_size
+            != self.tile_embedding_size
+        ):
+            raise ValueError(
+                'SpatialVim expected embeddings '
+                f'of dimension '
+                f'{self.tile_embedding_size}, '
+                f'but received '
+                f'{tile_embedding_size}.'
+            )
+
+        # [B, N, T, 960]
+        #        ↓
+        # [B, N, T, 516]
+        x = self.input_projection(
+            tile_embeddings
+        )
+
+        # Mamba performs spatial processing separately
+        # for every temporal position:
+        #
+        # [B, N, T, D]
+        #        ↓
+        # [B, T, N, D]
+        #        ↓
+        # [B*T, N, D]
+        x = x.permute(
+            0,
+            2,
+            1,
+            3,
+        ).contiguous()
+
+        x = x.reshape(
+            batch_size * series_length,
+            num_tiles,
+            self.vim_d_model,
+        )
+
+        # Insert the CLS token in the middle of the sequence.
+        cls_token = self.cls_token.expand(
+            batch_size * series_length,
+            -1,
+            -1,
+        )
+
+        cls_position = self.cls_position
+
+        x = torch.cat(
+            [
+                x[:, :cls_position, :],
+                cls_token,
+                x[:, cls_position:, :],
+            ],
+            dim=1,
+        )
+
+        # Add learned positional information.
+        x = (
+            x
+            + self.position_embeddings.to(
+                dtype=x.dtype
+            )
+        )
+
+        hidden_states = self.pos_drop(x)
+        residual = None
+
+        # Bidirectional Vim-style Mamba processing.
+        #
+        # Each pair contains:
+        #   one forward Mamba layer
+        #   one backward Mamba layer
+        for pair_idx in range(
+            len(self.layers) // 2
+        ):
+            forward_layer = self.layers[
+                pair_idx * 2
+            ]
+
+            backward_layer = self.layers[
+                pair_idx * 2 + 1
+            ]
+
+            hidden_states_f, residual_f = (
+                forward_layer(
+                    hidden_states,
+                    residual,
+                )
+            )
+
+            # Reverse spatial token order for the
+            # backward Mamba layer.
+            reversed_hidden = torch.flip(
+                hidden_states,
+                dims=[1],
+            ).contiguous()
+
+            reversed_residual = (
+                None
+                if residual is None
+                else torch.flip(
+                    residual,
+                    dims=[1],
+                ).contiguous()
+            )
+
+            hidden_states_b, residual_b = (
+                backward_layer(
+                    reversed_hidden,
+                    reversed_residual,
+                )
+            )
+
+            # Restore the original spatial order and
+            # combine both directions.
+            hidden_states = (
+                hidden_states_f
+                + torch.flip(
+                    hidden_states_b,
+                    dims=[1],
+                )
+            )
+
+            residual = (
+                residual_f
+                + torch.flip(
+                    residual_b,
+                    dims=[1],
+                )
+            )
+
+        # Final Vim-style Add -> Norm.
+        if residual is None:
+            residual = hidden_states
+        else:
+            residual = (
+                residual
+                + hidden_states
+            )
+
+        hidden_states = self.norm_f(
+            residual.to(
+                dtype=self.norm_f.weight.dtype
+            )
+        )
+
+        # Global image representation from CLS.
+        image_embedding = hidden_states[
+            :,
+            cls_position:cls_position + 1,
+            :
+        ]
+
+        # Remove CLS and recover the 45 tile embeddings
+        # in their original spatial order.
+        contextualized_tiles = torch.cat(
+            [
+                hidden_states[
+                    :,
+                    :cls_position,
+                    :
+                ],
+                hidden_states[
+                    :,
+                    cls_position + 1:,
+                    :
+                ],
+            ],
+            dim=1,
+        )
+
+        # Use the same convention as SpatialViT:
+        # [CLS, tile1, ..., tile45].
+        all_embeddings = torch.cat(
+            [
+                image_embedding,
+                contextualized_tiles,
+            ],
+            dim=1,
+        )
+
+        # [B*T, 46, D]
+        #       ↓
+        # [B, T, 46, D]
+        all_embeddings = (
+            all_embeddings.reshape(
+                batch_size,
+                series_length,
+                num_tiles + 1,
+                self.vim_d_model,
+            )
+        )
+
+        # [B, T, 46, D]
+        #       ↓
+        # [B, 46, T, D]
+        all_embeddings = (
+            all_embeddings.permute(
+                0,
+                2,
+                1,
+                3,
+            ).contiguous()
+        )
+
+        all_outputs, _ = (
+            self.embeddings_to_output(
+                all_embeddings,
+                batch_size,
+                num_tiles + 1,
+                series_length,
+            )
+        )
+
+        # CLS prediction.
+        image_outputs = all_outputs[:, 0]
+
+        # Predictions for the original 45 tiles.
+        tile_outputs = all_outputs[:, 1:]
+
+        return (
+            tile_outputs,
+            image_outputs,
+        )
+
+
 class TileToTileImage_ViViT(nn.Module):
     """Description: Video Vision Transformer operating on tiles to produce tile predictions"""
     
